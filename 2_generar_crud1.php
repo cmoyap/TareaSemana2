@@ -27,6 +27,44 @@ require __DIR__ . '/src/bootstrap.php';
 use App\Core\Database;
 
 // ============================================================
+// FUNCIONES AUXILIARES PARA CREAR TABLA DESDE .SQL
+// ============================================================
+
+function loadSqlFromFile(string $filePath): string
+{
+    if (!is_file($filePath)) {
+        throw new RuntimeException("No se encontró el archivo SQL: $filePath");
+    }
+
+    return file_get_contents($filePath);
+}
+
+function ensureTableFromSqlFile(PDO $pdo, string $table, string $sqlFile): void
+{
+    $sqlContent = loadSqlFromFile($sqlFile);
+
+    // Verificar si la tabla ya existe
+    $exists = $pdo->query("SELECT to_regclass('public.$table')")->fetchColumn();
+
+    if ($exists) {
+        echo "ℹ️ La tabla '$table' ya existe.\n";
+        return;
+    }
+
+    // Buscar solo el CREATE TABLE de esta tabla dentro del archivo
+    $pattern = '/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["\']?' . preg_quote($table, '/') . '["\']?\s*\(.*?\);/is';
+
+    if (preg_match($pattern, $sqlContent, $matches)) {
+        $pdo->exec($matches[0]);
+        echo "✅ Tabla '$table' creada desde archivo SQL.\n";
+    } else {
+        throw new RuntimeException(
+            "No se encontró CREATE TABLE para '$table' en el archivo SQL."
+        );
+    }
+}
+
+// ============================================================
 // NAMING
 // ============================================================
 
@@ -399,7 +437,38 @@ final class EntityBuilder extends TemplateBuilder
                 . " => $value,";
         }
 
-        return $this->fill($this->template(), [
+        $template = <<<'EOT'
+<?php
+declare(strict_types=1);
+
+namespace App\Entities;
+
+/** Una fila de la tabla {{TABLE}}. */
+final class {{ENTITY}}
+{
+    public function __construct(
+{{PARAMS}}
+    ) {
+    }
+
+    public static function fromArray(array $d): self
+    {
+        return new self(
+{{FROM}}
+        );
+    }
+
+    public function toArray(): array
+    {
+        return [
+{{TO}}
+        ];
+    }
+}
+
+EOT;
+
+        return $this->fill($template, [
             'PARAMS' => implode("\n", $params),
             'FROM' => implode("\n", $from),
             'TO' => implode("\n", $to),
@@ -463,40 +532,6 @@ final class EntityBuilder extends TemplateBuilder
 
         return "$cast($key ?? " . $this->defaultValue($column) . ')';
     }
-
-    private function template(): string
-    {
-        return <<<'EOT'
-<?php
-declare(strict_types=1);
-
-namespace App\Entities;
-
-/** Una fila de la tabla {{TABLE}}. */
-final class {{ENTITY}}
-{
-    public function __construct(
-{{PARAMS}}
-    ) {
-    }
-
-    public static function fromArray(array $d): self
-    {
-        return new self(
-{{FROM}}
-        );
-    }
-
-    public function toArray(): array
-    {
-        return [
-{{TO}}
-        ];
-    }
-}
-
-EOT;
-    }
 }
 
 // ============================================================
@@ -512,7 +547,7 @@ final class RepositoryInterfaceBuilder extends TemplateBuilder
 
     public function render(): string
     {
-        return $this->fill(<<<'EOT'
+        $template = <<<'EOT'
 <?php
 declare(strict_types=1);
 
@@ -534,7 +569,9 @@ interface {{ENTITY}}RepositoryInterface
     public function delete(int $id): void;
 }
 
-EOT);
+EOT;
+
+        return $this->fill($template);
     }
 }
 
@@ -573,21 +610,7 @@ final class RepositoryBuilder extends TemplateBuilder
 
         $pk = $this->b->pk()->name;
 
-        return $this->fill($this->template(), [
-            'WRITABLE' => implode(
-                ', ',
-                array_map(fn(string $name) => var_export($name, true), $names)
-            ),
-            'COLS' => implode(', ', $quotedNames),
-            'VALS' => implode(', ', $placeholders),
-            'SETS' => implode(', ', $sets),
-            'RETURNING' => '"' . $pk . '"',
-        ]);
-    }
-
-    private function template(): string
-    {
-        return <<<'EOT'
+        $template = <<<'EOT'
 <?php
 declare(strict_types=1);
 
@@ -678,6 +701,17 @@ final class {{ENTITY}}Repository implements {{ENTITY}}RepositoryInterface
 }
 
 EOT;
+
+        return $this->fill($template, [
+            'WRITABLE' => implode(
+                ', ',
+                array_map(fn(string $name) => var_export($name, true), $names)
+            ),
+            'COLS' => implode(', ', $quotedNames),
+            'VALS' => implode(', ', $placeholders),
+            'SETS' => implode(', ', $sets),
+            'RETURNING' => '"' . $pk . '"',
+        ]);
     }
 }
 
@@ -702,43 +736,7 @@ final class ServiceBuilder extends TemplateBuilder
             }
         }
 
-        return $this->fill(
-            $this->template(),
-            ['RULES' => implode("\n", $rules)]
-        );
-    }
-
-    private function rulesFor(Column $column): array
-    {
-        $name = $column->name;
-        $label = addslashes($column->label());
-        $rules = [];
-
-        if ($column->required && $column->phpType === 'string') {
-            $rules[] = "        if (trim((string) \$e->$name) === '') {\n"
-                . "            \$errors['$name'] = '$label es obligatorio.';\n"
-                . "        }";
-        }
-
-        if ($column->maxLength !== null) {
-            $rules[] = "        if (mb_strlen((string) \$e->$name) > {$column->maxLength}) {\n"
-                . "            \$errors['$name'] = '$label admite maximo {$column->maxLength} caracteres.';\n"
-                . "        }";
-        }
-
-        if ($column->input === 'email') {
-            $rules[] = "        if ((string) \$e->$name !== '' "
-                . "&& !filter_var(\$e->$name, FILTER_VALIDATE_EMAIL)) {\n"
-                . "            \$errors['$name'] = '$label no es un correo valido.';\n"
-                . "        }";
-        }
-
-        return $rules;
-    }
-
-    private function template(): string
-    {
-        return <<<'EOT'
+        $template = <<<'EOT'
 <?php
 declare(strict_types=1);
 
@@ -792,6 +790,39 @@ final class {{ENTITY}}Service
 }
 
 EOT;
+
+        return $this->fill(
+            $template,
+            ['RULES' => implode("\n", $rules)]
+        );
+    }
+
+    private function rulesFor(Column $column): array
+    {
+        $name = $column->name;
+        $label = addslashes($column->label());
+        $rules = [];
+
+        if ($column->required && $column->phpType === 'string') {
+            $rules[] = "        if (trim((string) \$e->$name) === '') {\n"
+                . "            \$errors['$name'] = '$label es obligatorio.';\n"
+                . "        }";
+        }
+
+        if ($column->maxLength !== null) {
+            $rules[] = "        if (mb_strlen((string) \$e->$name) > {$column->maxLength}) {\n"
+                . "            \$errors['$name'] = '$label admite maximo {$column->maxLength} caracteres.';\n"
+                . "        }";
+        }
+
+        if ($column->input === 'email') {
+            $rules[] = "        if ((string) \$e->$name !== '' "
+                . "&& !filter_var(\$e->$name, FILTER_VALIDATE_EMAIL)) {\n"
+                . "            \$errors['$name'] = '$label no es un correo valido.';\n"
+                . "        }";
+        }
+
+        return $rules;
     }
 }
 
@@ -810,7 +841,7 @@ final class ControllerBuilder extends TemplateBuilder
 
     public function render(): string
     {
-        return $this->fill(<<<'EOT'
+        $template = <<<'EOT'
 <?php
 declare(strict_types=1);
 
@@ -939,7 +970,9 @@ final class {{CONTROLLER}} extends Controller
     }
 }
 
-EOT);
+EOT;
+
+        return $this->fill($template);
     }
 }
 
@@ -967,31 +1000,7 @@ final class IndexViewBuilder extends TemplateBuilder
             $cells[] = '            ' . $this->cell($column);
         }
 
-        return $this->fill($this->template(), [
-            'TH' => implode("\n", $headers),
-            'TD' => implode("\n", $cells),
-        ]);
-    }
-
-    private function cell(Column $column): string
-    {
-        $value = "\$item->{$column->name}";
-
-        return match (true) {
-            $column->phpType === 'bool' =>
-                "<td><?= $value === null ? '-' : ($value ? 'Si' : 'No') ?></td>",
-
-            $column->input === 'textarea' =>
-                "<td><?= e(mb_strimwidth((string) $value, 0, 60, '...')) ?></td>",
-
-            default =>
-                "<td><?= e($value) ?></td>",
-        };
-    }
-
-    private function template(): string
-    {
-        return <<<'EOT'
+        $template = <<<'EOT'
 <div class="toolbar">
     <h1>{{TITLE}}</h1>
     <a class="btn" href="<?= url('{{TABLE}}/create') ?>">Nuevo</a>
@@ -1027,6 +1036,27 @@ final class IndexViewBuilder extends TemplateBuilder
 <?php endif; ?>
 
 EOT;
+
+        return $this->fill($template, [
+            'TH' => implode("\n", $headers),
+            'TD' => implode("\n", $cells),
+        ]);
+    }
+
+    private function cell(Column $column): string
+    {
+        $value = "\$item->{$column->name}";
+
+        return match (true) {
+            $column->phpType === 'bool' =>
+                "<td><?= $value === null ? '-' : ($value ? 'Si' : 'No') ?></td>",
+
+            $column->input === 'textarea' =>
+                "<td><?= e(mb_strimwidth((string) $value, 0, 60, '...')) ?></td>",
+
+            default =>
+                "<td><?= e($value) ?></td>",
+        };
     }
 }
 
@@ -1049,8 +1079,22 @@ final class FormViewBuilder extends TemplateBuilder
             $fields[] = $this->field($column);
         }
 
+        $template = <<<'EOT'
+<h1><?= e($title) ?></h1>
+
+<form method="post" action="<?= url($action) ?>">
+{{FIELDS}}
+
+    <div class="buttons">
+        <button class="btn" type="submit">Guardar</button>
+        <a href="<?= url('{{TABLE}}') ?>">Cancelar</a>
+    </div>
+</form>
+
+EOT;
+
         return $this->fill(
-            $this->template(),
+            $template,
             ['FIELDS' => implode("\n\n", $fields)]
         );
     }
@@ -1105,23 +1149,6 @@ final class FormViewBuilder extends TemplateBuilder
             <small class="error"><?= e(\$errors['$name']) ?></small>
         <?php endif; ?>
     </div>
-EOT;
-    }
-
-    private function template(): string
-    {
-        return <<<'EOT'
-<h1><?= e($title) ?></h1>
-
-<form method="post" action="<?= url($action) ?>">
-{{FIELDS}}
-
-    <div class="buttons">
-        <button class="btn" type="submit">Guardar</button>
-        <a href="<?= url('{{TABLE}}') ?>">Cancelar</a>
-    </div>
-</form>
-
 EOT;
     }
 }
@@ -1251,6 +1278,9 @@ $arguments = array_values(array_filter(
 
 $force = in_array('--force', $argv, true);
 
+// Ruta a tu archivo .sql con las definiciones de tablas
+$sqlFile = __DIR__ . '/database/migrations/001_create_tables.sql'; // <-- Cambia aquí si tu archivo tiene otro nombre
+
 try {
     $inspector = new TableInspector(Database::connection());
 
@@ -1271,6 +1301,10 @@ try {
     if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $table)) {
         throw new RuntimeException('Nombre de tabla invalido.');
     }
+
+    // --- CREAR TABLA DESDE .SQL SI NO EXISTE ---
+    ensureTableFromSqlFile(Database::connection(), $table, $sqlFile);
+    // ------------------------------------------
 
     $entity = $arguments[1]
         ?? Naming::studly(Naming::singular($table));

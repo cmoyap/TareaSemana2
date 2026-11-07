@@ -1,1 +1,6 @@
-cd C:\xampp\htdocs\miproyecto; & "C:\xampp\php\php.exe" .\1_crear_proyecto.php
+cd C:\xampp\htdocs\TareaSemana2; & C:\xampp\php\php.exe .\1_crear_proyecto.php
+C:\xampp\php\php.exe bin/migrate.php
+C:\xampp\php\php.exe .\2_generar_crud.php products
+C:\xampp\php\php.exe .\2_generar_crud.php users
+--VER ERRRORES DE EJECUCION DE LA APP
+Get-Content "C:\xampp\apache\logs\error.log" -Tail 500
